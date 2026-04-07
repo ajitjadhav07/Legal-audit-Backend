@@ -1,0 +1,96 @@
+name: Deploy — Backend + Frontend (Option A)
+
+# ─────────────────────────────────────────────────────────────
+# This workflow replaces the old deploy-frontend.yml.
+#
+# Previously:
+#   frontend/ changes → build React → sync to S3 → invalidate CloudFront
+#
+# Now (Option A):
+#   ANY change to frontend/ OR backend/ → build multi-stage Docker image
+#   (React is bundled inside the image) → push to ECR → force ECS redeploy
+#
+# The old deploy-frontend.yml can be deleted from .github/workflows/
+# ─────────────────────────────────────────────────────────────
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'frontend/**'
+      - 'backend/**'
+      - 'buildspec.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        run: |
+          aws ecr get-login-password --region ${{ secrets.AWS_REGION }} \
+            | docker login --username AWS --password-stdin \
+              ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com
+
+      # Build backend image from repo root so the multi-stage Dockerfile
+      # can access both frontend/ and backend/ directories
+      - name: Build backend image (includes bundled React)
+        run: |
+          docker build --no-cache \
+            -f backend/Dockerfile \
+            -t legal-audit-backend \
+            .
+          docker tag legal-audit-backend:latest \
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/legal-audit-backend:latest
+
+      - name: Build worker image
+        run: |
+          docker build --no-cache \
+            -f backend/Dockerfile.worker \
+            -t legal-audit-worker \
+            ./backend
+          docker tag legal-audit-worker:latest \
+            ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/legal-audit-worker:latest
+
+      - name: Push images to ECR
+        run: |
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/legal-audit-backend:latest
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ secrets.AWS_REGION }}.amazonaws.com/legal-audit-worker:latest
+
+      # Force ECS to pull the new image and do a rolling redeploy
+      - name: Force ECS redeployment
+        run: |
+          aws ecs update-service \
+            --cluster legal-audit-cluster \
+            --service legal-audit-backend \
+            --force-new-deployment \
+            --region ${{ secrets.AWS_REGION }}
+
+      - name: Wait for ECS service to stabilize
+        run: |
+          aws ecs wait services-stable \
+            --cluster legal-audit-cluster \
+            --services legal-audit-backend \
+            --region ${{ secrets.AWS_REGION }}
+          echo "✓ ECS service is stable. App available at http://app.internal"
+
+# ── Required GitHub Secrets ───────────────────────────────────
+# AWS_ACCESS_KEY_ID      — IAM user with ECR push + ECS update permissions
+# AWS_SECRET_ACCESS_KEY  — corresponding secret key
+# AWS_REGION             — ap-south-1
+# AWS_ACCOUNT_ID         — 141095608859
+#
+# Secrets NO LONGER needed (remove them from GitHub Settings → Secrets):
+#   VITE_API_URL          (removed — same-origin, not needed)
+#   S3_FRONTEND_BUCKET    (removed — S3 frontend bucket deleted)
+#   CLOUDFRONT_DIST_ID    (removed — CloudFront distribution deleted)

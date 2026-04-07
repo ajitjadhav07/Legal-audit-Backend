@@ -1,5 +1,19 @@
 version: 0.2
 
+# ─────────────────────────────────────────────────────────────
+# buildspec.yml — CodeBuild CI/CD (Option A)
+#
+# Changes from previous config:
+#   • Backend docker build context changed from ./backend to . (repo root)
+#     so the multi-stage Dockerfile can COPY frontend/ into the image
+#   • Dockerfile path is now explicitly specified: -f backend/Dockerfile
+#   • Worker build is unchanged
+#   • Frontend S3 sync and CloudFront invalidation steps REMOVED
+#
+# Required CodeBuild environment variables:
+#   AWS_ACCOUNT_ID  — your AWS account ID (141095608859)
+# ─────────────────────────────────────────────────────────────
+
 phases:
   pre_build:
     commands:
@@ -8,12 +22,15 @@ phases:
 
   build:
     commands:
-      - echo Building Backend image...
-      - docker build --no-cache -t legal-audit-backend ./backend
+      # Build backend image (multi-stage: builds React then packages with Express)
+      # Context is repo root (.) so Dockerfile can access both frontend/ and backend/
+      - echo Building Backend image (includes bundled React frontend)...
+      - docker build --no-cache -f backend/Dockerfile -t legal-audit-backend .
       - docker tag legal-audit-backend:latest $AWS_ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/legal-audit-backend:latest
 
+      # Build worker image (context is ./backend, unchanged)
       - echo Building Worker image...
-      - docker build --no-cache -t legal-audit-worker -f ./backend/Dockerfile.worker ./backend
+      - docker build --no-cache -t legal-audit-worker -f backend/Dockerfile.worker ./backend
       - docker tag legal-audit-worker:latest $AWS_ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/legal-audit-worker:latest
 
   post_build:
@@ -21,4 +38,7 @@ phases:
       - echo Pushing images to ECR...
       - docker push $AWS_ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/legal-audit-backend:latest
       - docker push $AWS_ACCOUNT_ID.dkr.ecr.ap-south-1.amazonaws.com/legal-audit-worker:latest
-      - echo Done!
+      - echo Done! Both images pushed successfully.
+      # NOTE: No S3 sync or CloudFront invalidation needed.
+      # The React app is now bundled inside the backend Docker image.
+      # A new ECS deployment picks up the latest image automatically.
