@@ -1,2 +1,0 @@
-# Legal-audit-Backend
-backend
